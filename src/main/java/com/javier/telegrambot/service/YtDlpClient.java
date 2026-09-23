@@ -51,13 +51,13 @@ public class YtDlpClient {
             log.warn("yt-dlp failed for URL: {}. Error: {}", url, e.getMessage());
         }
 
-        // 2-qadam: Instagram rasm fallback (og:image orqali)
+    // 2-qadam: gallery-dl fallback (ayniqsa rasm karusellari uchun)
         if (url.contains("instagram.com")) {
             try {
-                List<MediaItem> items = resolveInstagramImages(url);
+                List<MediaItem> items = resolveViaGalleryDl(url);
                 if (!items.isEmpty()) return items;
             } catch (Exception e) {
-                log.warn("Instagram image fallback failed for URL: {}: {}", url, e.getMessage());
+                log.warn("gallery-dl fallback failed for URL: {}: {}", url, e.getMessage());
             }
         }
 
@@ -94,7 +94,6 @@ public class YtDlpClient {
         String stderrOutput = stderrFuture.get(5, TimeUnit.SECONDS);
         int exitCode = process.exitValue();
 
-        // JSON bo'lsa — parse qilish (exit code 1 bo'lsa ham, qisman natija bo'lishi mumkin)
         if (jsonOutput != null && !jsonOutput.isBlank()) {
             try {
                 JsonNode rootNode = objectMapper.readTree(jsonOutput);
@@ -116,64 +115,66 @@ public class YtDlpClient {
     }
 
     // ================================================================
-    // INSTAGRAM RASM FALLBACK (embed API)
+    // GALLERY-DL — RASM/KARUSEL FALLBACK
     // ================================================================
 
-    private List<MediaItem> resolveInstagramImages(String url) throws Exception {
-        log.info("Trying Instagram embed fallback for URL: {}", url);
+    private List<MediaItem> resolveViaGalleryDl(String url) throws Exception {
+        log.info("Trying gallery-dl fallback for URL: {}", url);
 
-        String cleanUrl = url.contains("?") ? url.substring(0, url.indexOf("?")) : url;
-        if (!cleanUrl.endsWith("/")) cleanUrl += "/";
+        ProcessBuilder pb = new ProcessBuilder(
+                "gallery-dl",
+                "-j",
+                "--ignore-config",
+                url
+        );
 
-        String embedUrl = cleanUrl + "embed/";
+        Process process = pb.start();
+        CompletableFuture<String> stdoutFuture = readStreamAsync(process.getInputStream());
+        CompletableFuture<String> stderrFuture = readStreamAsync(process.getErrorStream());
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(embedUrl))
-                .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .GET()
-                .build();
+        boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            throw new RuntimeException("gallery-dl timed out");
+        }
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        String html = response.body();
+        String jsonOutput = stdoutFuture.get(5, TimeUnit.SECONDS);
+        String stderrOutput = stderrFuture.get(5, TimeUnit.SECONDS);
 
-        log.info("Instagram embed response HTML (first 500 chars): {}", 
-                 html != null && html.length() > 500 ? html.substring(0, 500) : html);
-
-        if (html == null || html.isBlank()) return Collections.emptyList();
-
+        if (jsonOutput == null || jsonOutput.isBlank()) {
+            log.warn("gallery-dl returned empty stdout. stderr: {}", stderrOutput);
+            return Collections.emptyList();
+        }
 
         List<MediaItem> items = new ArrayList<>();
-
-        // 1-bosqich: Video bormi?
-        Pattern videoPattern = Pattern.compile("\"video_url\"\\s*:\\s*\"([^\"]+)\"");
-        Matcher videoMatcher = videoPattern.matcher(html);
-        while (videoMatcher.find()) {
-            String videoUrl = videoMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
-            items.add(new MediaItem(videoUrl, "video"));
-        }
-
-        // 2-bosqich: Karusel rasmlari (EmbeddedMediaImage)
-        if (items.isEmpty()) {
-            Pattern imgPattern = Pattern.compile("class=\"EmbeddedMediaImage\"[^>]*src=\"([^\"]+)\"");
-            Matcher imgMatcher = imgPattern.matcher(html);
-            while (imgMatcher.find()) {
-                String imgUrl = imgMatcher.group(1).replace("&amp;", "&");
-                items.add(new MediaItem(imgUrl, "image"));
-            }
-
-            // Fallback: display_url (bitta rasm bo'lsa)
-            if (items.isEmpty()) {
-                Pattern displayPattern = Pattern.compile("\"display_url\"\\s*:\\s*\"([^\"]+)\"");
-                Matcher displayMatcher = displayPattern.matcher(html);
-                while (displayMatcher.find()) {
-                    String imgUrl = displayMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
-                    items.add(new MediaItem(imgUrl, "image"));
+        
+        try {
+            // gallery-dl JSON format: odatda root array bo'ladi [ [Type, "Url", {metadata}], ... ]
+            JsonNode rootNode = objectMapper.readTree(jsonOutput);
+            if (rootNode.isArray()) {
+                for (JsonNode node : rootNode) {
+                    if (node.isArray()) {
+                        // Odatda indeks 1 da to'g'ridan-to'g'ri URL yotadi 
+                        for (JsonNode innerNode : node) {
+                            if (innerNode.isTextual()) {
+                                String imgUrl = innerNode.asText();
+                                if (imgUrl != null && imgUrl.startsWith("http")) {
+                                    // Agar rasm URL si bo'lsa
+                                    if (imgUrl.contains(".jpg") || imgUrl.contains(".webp") || imgUrl.contains(".png")) {
+                                        items.add(new MediaItem(imgUrl.replace("\\u0026", "&"), "image"));
+                                        break; // Shu element uchun bitta URL yetarli
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        } catch (Exception e) {
+            log.error("Failed to parse gallery-dl JSON", e);
         }
 
-        log.info("Instagram embed fallback resolved {} media item(s) for URL: {}", items.size(), url);
+        log.info("gallery-dl fallback resolved {} media item(s) for URL: {}", items.size(), url);
         return items;
     }
 
