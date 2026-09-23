@@ -6,7 +6,7 @@ public class MediaUrlUtils {
         if (url == null) return false;
         
         // Instagram
-        if (url.matches("(?i)^https?://(www\\.)?instagram\\.com/(reel|p|tv|shorts)/.+")) return true;
+        if (url.matches("(?i)^https?://(www\\.)?instagram\\.com/(reels?|p|tv|stories|shorts)/.+")) return true;
         // YouTube
         if (url.matches("(?i)^https?://(www\\.)?(youtube\\.com|youtu\\.be)/.+")) return true;
         // TikTok
