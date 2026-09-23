@@ -34,7 +34,7 @@ public class InstagramDownloadService {
             private final AtomicInteger counter = new AtomicInteger(1);
             @Override
             public Thread newThread(@NonNull Runnable r) {
-                return new Thread(r, "instagram-worker-" + counter.getAndIncrement());
+                return new Thread(r, "telegram-worker-" + counter.getAndIncrement());
             }
         };
 
@@ -44,32 +44,29 @@ public class InstagramDownloadService {
         );
     }
 
-    /**
-     * So'rovni asinxron ravishda ThreadPool ga yuboradi.
-     */
-    public CompletableFuture<List<MediaItem>> processUrlAsync(String instagramUrl) {
+    public CompletableFuture<List<MediaItem>> processUrlAsync(String url) {
         return CompletableFuture.supplyAsync(() -> {
-            Object lock = urlLocks.computeIfAbsent(instagramUrl, k -> new Object());
+            Object lock = urlLocks.computeIfAbsent(url, k -> new Object());
             try {
                 synchronized (lock) {
-                    return resolveMediaWithRetry(instagramUrl);
+                    return resolveWithRetry(url);
                 }
             } finally {
-                urlLocks.remove(instagramUrl, lock);
+                urlLocks.remove(url, lock);
             }
         }, executorService);
     }
 
-    private List<MediaItem> resolveMediaWithRetry(String instagramUrl) {
+    private List<MediaItem> resolveWithRetry(String url) {
         Exception lastException;
 
         for (int attempt = 1; true; attempt++) {
             try {
-                rateLimiter.acquire(); // API ni bosib ketmaslik uchun
-                return ytDlpClient.resolveMedia(instagramUrl);
+                rateLimiter.acquire();
+                return ytDlpClient.resolveMedia(url);
             } catch (Exception e) {
                 lastException = e;
-                log.warn("Attempt {} failed for url {}: {}", attempt, instagramUrl, e.getMessage());
+                log.warn("Attempt {} failed for url {}: {}", attempt, url, e.getMessage());
 
                 if (attempt > MAX_RETRIES) break;
 
@@ -84,7 +81,7 @@ public class InstagramDownloadService {
                 }
             }
         }
-        throw new RuntimeException("yt-dlp media processing failed: " + lastException.getMessage(), lastException);
+        throw new RuntimeException("Media processing failed: " + lastException.getMessage(), lastException);
     }
 
     @PreDestroy

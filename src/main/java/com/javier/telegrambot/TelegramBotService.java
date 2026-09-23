@@ -107,6 +107,7 @@ public class TelegramBotService extends TelegramLongPollingBot {
                 sendVideo.setChatId(chatId);
                 sendVideo.setVideo(new InputFile(media.url()));
                 sendVideo.setCaption(NAV_MESSAGE);
+                sendVideo.setSupportsStreaming(true);
                 execute(sendVideo);
             } else {
                 SendPhoto sendPhoto = new SendPhoto();

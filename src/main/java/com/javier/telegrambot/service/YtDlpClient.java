@@ -38,33 +38,35 @@ public class YtDlpClient {
                 .build();
     }
 
+    /**
+     * URL dan media URL larni ajratib oladi. Serverga fayl yuklamaydi —
+     * faqat CDN URL qaytaradi, Telegram serverlari o'zi yuklaydi.
+     */
     public List<MediaItem> resolveMedia(String url) {
-        // 1-qadam: yt-dlp orqali urinish (video uchun)
+        // 1-qadam: yt-dlp orqali urinish (video/reels uchun)
         try {
             List<MediaItem> items = resolveViaYtDlp(url);
-            if (!items.isEmpty()) {
-                return items;
-            }
+            if (!items.isEmpty()) return items;
         } catch (Exception e) {
-            log.warn("yt-dlp failed for URL: {}. Trying embed fallback. Error: {}", url, e.getMessage());
+            log.warn("yt-dlp failed for URL: {}. Error: {}", url, e.getMessage());
         }
 
-        // 2-qadam: Instagram embed API orqali urinish (rasm uchun)
+        // 2-qadam: Instagram rasm fallback (og:image orqali)
         if (url.contains("instagram.com")) {
             try {
-                List<MediaItem> items = resolveViaInstagramEmbed(url);
-                if (!items.isEmpty()) {
-                    return items;
-                }
+                List<MediaItem> items = resolveInstagramImages(url);
+                if (!items.isEmpty()) return items;
             } catch (Exception e) {
-                log.warn("Instagram embed fallback also failed for URL: {}: {}", url, e.getMessage());
+                log.warn("Instagram image fallback failed for URL: {}: {}", url, e.getMessage());
             }
         }
 
         return Collections.emptyList();
     }
 
-    // ============== YT-DLP METODI ==============
+    // ================================================================
+    // YT-DLP — VIDEO URL OLISH
+    // ================================================================
 
     private List<MediaItem> resolveViaYtDlp(String url) throws Exception {
         log.info("Processing URL via yt-dlp: {}", url);
@@ -74,126 +76,102 @@ public class YtDlpClient {
                 "-J",
                 "--no-warnings",
                 "--ignore-errors",
+                "--format", "b",       // best single-stream (video+audio birgalikda)
                 url
         );
 
         Process process = pb.start();
-
-        // stdout va stderr ni parallel o'qish — deadlock bo'lmasligi uchun
         CompletableFuture<String> stdoutFuture = readStreamAsync(process.getInputStream());
         CompletableFuture<String> stderrFuture = readStreamAsync(process.getErrorStream());
 
         boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         if (!finished) {
             process.destroyForcibly();
-            log.error("yt-dlp timed out after {}s for URL: {}", PROCESS_TIMEOUT_SECONDS, url);
-            throw new RuntimeException("yt-dlp execution timed out");
+            throw new RuntimeException("yt-dlp timed out");
         }
 
-        int exitCode = process.exitValue();
         String jsonOutput = stdoutFuture.get(5, TimeUnit.SECONDS);
-        String errorOutput = stderrFuture.get(5, TimeUnit.SECONDS);
+        String stderrOutput = stderrFuture.get(5, TimeUnit.SECONDS);
+        int exitCode = process.exitValue();
 
-        // --ignore-errors bilan exit code 0 yoki 1 bo'lishi mumkin,
-        // lekin JSON chiqish bo'lsa uni parse qilishga harakat qilamiz
+        // JSON bo'lsa — parse qilish (exit code 1 bo'lsa ham, qisman natija bo'lishi mumkin)
         if (jsonOutput != null && !jsonOutput.isBlank()) {
             try {
                 JsonNode rootNode = objectMapper.readTree(jsonOutput);
                 List<MediaItem> items = parseResponse(rootNode);
                 log.info("yt-dlp resolved {} media item(s) for URL: {}", items.size(), url);
-                if (!items.isEmpty()) {
-                    return items;
-                }
+                if (!items.isEmpty()) return items;
             } catch (Exception e) {
-                log.warn("Failed to parse yt-dlp JSON output: {}", e.getMessage());
+                log.warn("Failed to parse yt-dlp JSON: {}", e.getMessage());
             }
         }
 
         if (exitCode != 0) {
-            log.error("yt-dlp exit code {} for URL: {}. stderr: {}", exitCode, url,
-                    errorOutput.length() > 300 ? errorOutput.substring(0, 300) : errorOutput);
+            log.warn("yt-dlp exit code {} for URL: {}. stderr: {}", exitCode, url,
+                    stderrOutput.length() > 300 ? stderrOutput.substring(0, 300) : stderrOutput);
             throw new RuntimeException("yt-dlp failed with exit code " + exitCode);
         }
 
         return Collections.emptyList();
     }
 
-    // ============== INSTAGRAM EMBED FALLBACK ==============
+    // ================================================================
+    // INSTAGRAM RASM FALLBACK (og:image)
+    // ================================================================
 
-    private List<MediaItem> resolveViaInstagramEmbed(String url) throws Exception {
-        log.info("Trying Instagram embed fallback for URL: {}", url);
+    private List<MediaItem> resolveInstagramImages(String url) throws Exception {
+        log.info("Trying Instagram og:image fallback for URL: {}", url);
 
-        // Query parametrlarni olib tashlash
         String cleanUrl = url.contains("?") ? url.substring(0, url.indexOf("?")) : url;
         if (!cleanUrl.endsWith("/")) cleanUrl += "/";
 
-        String embedUrl = cleanUrl + "embed/";
-
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(embedUrl))
+                .uri(URI.create(cleanUrl))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
+                .header("Accept", "text/html")
+                .header("Accept-Language", "en-US,en;q=0.9")
                 .GET()
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         String html = response.body();
 
-        if (html == null || html.isBlank()) {
-            return Collections.emptyList();
-        }
+        if (html == null || html.isBlank()) return Collections.emptyList();
 
         List<MediaItem> items = new ArrayList<>();
 
-        // Video URL larni izlash
-        Pattern videoPattern = Pattern.compile("\"video_url\"\\s*:\\s*\"([^\"]+)\"");
-        Matcher videoMatcher = videoPattern.matcher(html);
-        while (videoMatcher.find()) {
-            String videoUrl = videoMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
-            items.add(new MediaItem(videoUrl, "video"));
-        }
+        // og:video — ba'zan HTML da video URL ham bo'lishi mumkin
+        extractOgUrls(html, "og:video", "video", items);
 
-        // Rasm URL larni izlash (display_url yoki src)
+        // og:image — rasm URL
         if (items.isEmpty()) {
-            // Birinchi EmbeddedMediaImage src ni izlash
-            Pattern imgPattern = Pattern.compile("class=\"EmbeddedMediaImage\"[^>]*src=\"([^\"]+)\"");
-            Matcher imgMatcher = imgPattern.matcher(html);
-            while (imgMatcher.find()) {
-                String imgUrl = imgMatcher.group(1).replace("&amp;", "&");
-                items.add(new MediaItem(imgUrl, "image"));
-            }
-
-            // Fallback: display_url dan izlash
-            if (items.isEmpty()) {
-                Pattern displayPattern = Pattern.compile("\"display_url\"\\s*:\\s*\"([^\"]+)\"");
-                Matcher displayMatcher = displayPattern.matcher(html);
-                while (displayMatcher.find()) {
-                    String imgUrl = displayMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
-                    items.add(new MediaItem(imgUrl, "image"));
-                }
-            }
+            extractOgUrls(html, "og:image", "image", items);
         }
 
-        log.info("Instagram embed resolved {} media item(s) for URL: {}", items.size(), url);
+        log.info("Instagram og fallback resolved {} media item(s) for URL: {}", items.size(), url);
         return items;
     }
 
-    // ============== JSON PARSE METODLARI ==============
+    private void extractOgUrls(String html, String property, String mediaType, List<MediaItem> items) {
+        Pattern pattern = Pattern.compile(
+                "<meta[^>]*(?:property=[\"']" + Pattern.quote(property) + "[\"'][^>]*content=[\"']([^\"']+)[\"']" +
+                        "|content=[\"']([^\"']+)[\"'][^>]*property=[\"']" + Pattern.quote(property) + "[\"'])",
+                Pattern.CASE_INSENSITIVE
+        );
 
-    private CompletableFuture<String> readStreamAsync(java.io.InputStream inputStream) {
-        return CompletableFuture.supplyAsync(() -> {
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    sb.append(line);
-                }
-            } catch (Exception e) {
-                log.error("Error reading process stream", e);
+        Matcher matcher = pattern.matcher(html);
+        while (matcher.find()) {
+            String mediaUrl = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+            if (mediaUrl != null && !mediaUrl.isBlank()) {
+                items.add(new MediaItem(mediaUrl.replace("&amp;", "&"), mediaType));
             }
-            return sb.toString();
-        });
+        }
     }
+
+    // ================================================================
+    // JSON PARSE
+    // ================================================================
 
     private List<MediaItem> parseResponse(JsonNode rootNode) {
         List<MediaItem> items = new ArrayList<>();
@@ -222,7 +200,7 @@ public class YtDlpClient {
 
         String downloadUrl = getTextSafe(node, "url");
 
-        // 1-fallback: requested_downloads dan izlash
+        // 1-fallback: requested_downloads
         if (isBlank(downloadUrl) && node.has("requested_downloads")) {
             JsonNode requested = node.get("requested_downloads");
             if (requested.isArray() && requested.size() > 0) {
@@ -230,15 +208,15 @@ public class YtDlpClient {
             }
         }
 
-        // 2-fallback: formats massividan eng yaxshi video formatni izlash
+        // 2-fallback: formats massividan video+audio birgalikda
         if (isBlank(downloadUrl) && node.has("formats")) {
             JsonNode formats = node.get("formats");
             if (formats.isArray()) {
-                downloadUrl = findBestVideoUrl(formats);
+                downloadUrl = findBestCombinedUrl(formats);
             }
         }
 
-        // 3-fallback: thumbnail (rasm postlar uchun)
+        // 3-fallback: thumbnail (rasm sifatida)
         if (isBlank(downloadUrl) && node.has("thumbnail")) {
             downloadUrl = getTextSafe(node, "thumbnail");
             if (!isBlank(downloadUrl)) {
@@ -248,7 +226,7 @@ public class YtDlpClient {
         }
 
         if (isBlank(downloadUrl)) {
-            log.warn("No download URL found for id: {}", getTextSafe(node, "id"));
+            log.warn("No URL found for id: {}", getTextSafe(node, "id"));
             return;
         }
 
@@ -256,40 +234,45 @@ public class YtDlpClient {
         items.add(new MediaItem(downloadUrl, mediaType));
     }
 
-    private String findBestVideoUrl(JsonNode formats) {
-        String bestUrl = null;
-        int bestHeight = -1;
+    /**
+     * formats massividan video+audio birgalikda bo'lgan eng yaxshi formatni topadi.
+     * Bu GIF muammosini hal qiladi: Telegram audiosiz videolarni GIF deb ko'rsatadi.
+     */
+    private String findBestCombinedUrl(JsonNode formats) {
+        String bestCombinedUrl = null;   // video + audio
+        int bestCombinedHeight = -1;
+        String bestVideoOnlyUrl = null;  // faqat video (fallback)
+        int bestVideoOnlyHeight = -1;
 
         for (JsonNode fmt : formats) {
             String fmtUrl = getTextSafe(fmt, "url");
             if (isBlank(fmtUrl)) continue;
 
             String vcodec = getTextSafe(fmt, "vcodec");
+            String acodec = getTextSafe(fmt, "acodec");
             boolean hasVideo = vcodec != null && !"none".equals(vcodec);
+            boolean hasAudio = acodec != null && !"none".equals(acodec);
+            int height = fmt.has("height") && !fmt.get("height").isNull() ? fmt.get("height").asInt(0) : 0;
 
-            if (hasVideo) {
-                int height = fmt.has("height") && !fmt.get("height").isNull()
-                        ? fmt.get("height").asInt(0) : 0;
-
-                if (bestUrl == null || height > bestHeight) {
-                    bestUrl = fmtUrl;
-                    bestHeight = height;
+            if (hasVideo && hasAudio) {
+                // Eng yaxshi: video + audio bitta streamda
+                if (height > bestCombinedHeight) {
+                    bestCombinedUrl = fmtUrl;
+                    bestCombinedHeight = height;
+                }
+            } else if (hasVideo && bestCombinedUrl == null) {
+                // Fallback: faqat video
+                if (height > bestVideoOnlyHeight) {
+                    bestVideoOnlyUrl = fmtUrl;
+                    bestVideoOnlyHeight = height;
                 }
             }
         }
 
-        // Agar video topilmasa, har qanday formatni olish
-        if (bestUrl == null) {
-            for (JsonNode fmt : formats) {
-                String fmtUrl = getTextSafe(fmt, "url");
-                if (!isBlank(fmtUrl)) return fmtUrl;
-            }
-        }
-
-        return bestUrl;
+        return bestCombinedUrl != null ? bestCombinedUrl : bestVideoOnlyUrl;
     }
 
-    private String detectMediaType(JsonNode node, String downloadUrl) {
+    private String detectMediaType(JsonNode node, String url) {
         String ext = getTextSafe(node, "ext");
         if (ext != null) {
             return switch (ext.toLowerCase()) {
@@ -298,16 +281,33 @@ public class YtDlpClient {
                 default -> "video";
             };
         }
-        if (downloadUrl.contains(".jpg") || downloadUrl.contains(".webp") || downloadUrl.contains(".png")) {
-            return "image";
-        }
+        if (url.contains(".jpg") || url.contains(".webp") || url.contains(".png")) return "image";
         return "video";
+    }
+
+    // ================================================================
+    // YORDAMCHI METODLAR
+    // ================================================================
+
+    private CompletableFuture<String> readStreamAsync(java.io.InputStream is) {
+        return CompletableFuture.supplyAsync(() -> {
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(is))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line);
+                }
+            } catch (Exception e) {
+                log.error("Error reading process stream", e);
+            }
+            return sb.toString();
+        });
     }
 
     private String getTextSafe(JsonNode node, String field) {
         if (node != null && node.has(field) && !node.get(field).isNull()) {
-            String value = node.get(field).asText();
-            return value.isBlank() ? null : value;
+            String val = node.get(field).asText();
+            return val.isBlank() ? null : val;
         }
         return null;
     }
