@@ -8,11 +8,18 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -21,62 +28,157 @@ public class YtDlpClient {
     private final ObjectMapper objectMapper;
     private static final String YT_DLP_COMMAND = "yt-dlp";
     private static final int PROCESS_TIMEOUT_SECONDS = 60;
+    private final HttpClient httpClient;
 
     public YtDlpClient(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
     }
 
     public List<MediaItem> resolveMedia(String url) {
+        // 1-qadam: yt-dlp orqali urinish (video uchun)
         try {
-            log.info("Processing URL via yt-dlp: {}", url);
-
-            ProcessBuilder pb = new ProcessBuilder(
-                    YT_DLP_COMMAND,
-                    "-J",
-                    "--no-warnings",
-                    "--no-playlist",
-                    url
-            );
-
-            Process process = pb.start();
-
-            // stdout va stderr ni parallel o'qish — deadlock bo'lmasligi uchun
-            CompletableFuture<String> stdoutFuture = readStreamAsync(process.getInputStream());
-            CompletableFuture<String> stderrFuture = readStreamAsync(process.getErrorStream());
-
-            boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                log.error("yt-dlp timed out after {}s for URL: {}", PROCESS_TIMEOUT_SECONDS, url);
-                throw new RuntimeException("yt-dlp execution timed out");
+            List<MediaItem> items = resolveViaYtDlp(url);
+            if (!items.isEmpty()) {
+                return items;
             }
-
-            int exitCode = process.exitValue();
-            String jsonOutput = stdoutFuture.get(5, TimeUnit.SECONDS);
-            String errorOutput = stderrFuture.get(5, TimeUnit.SECONDS);
-
-            if (exitCode != 0) {
-                log.error("yt-dlp exit code {} for URL: {}. stderr: {}", exitCode, url, errorOutput);
-                throw new RuntimeException("yt-dlp failed: " + errorOutput);
-            }
-
-            if (jsonOutput == null || jsonOutput.isBlank()) {
-                log.error("yt-dlp returned empty output for URL: {}", url);
-                return Collections.emptyList();
-            }
-
-            JsonNode rootNode = objectMapper.readTree(jsonOutput);
-            List<MediaItem> items = parseResponse(rootNode);
-            log.info("Resolved {} media item(s) for URL: {}", items.size(), url);
-            return items;
-
-        } catch (RuntimeException e) {
-            throw e;
         } catch (Exception e) {
-            log.error("Failed to resolve media for URL: {}", url, e);
-            throw new RuntimeException("Media processing failed", e);
+            log.warn("yt-dlp failed for URL: {}. Trying embed fallback. Error: {}", url, e.getMessage());
         }
+
+        // 2-qadam: Instagram embed API orqali urinish (rasm uchun)
+        if (url.contains("instagram.com")) {
+            try {
+                List<MediaItem> items = resolveViaInstagramEmbed(url);
+                if (!items.isEmpty()) {
+                    return items;
+                }
+            } catch (Exception e) {
+                log.warn("Instagram embed fallback also failed for URL: {}: {}", url, e.getMessage());
+            }
+        }
+
+        return Collections.emptyList();
     }
+
+    // ============== YT-DLP METODI ==============
+
+    private List<MediaItem> resolveViaYtDlp(String url) throws Exception {
+        log.info("Processing URL via yt-dlp: {}", url);
+
+        ProcessBuilder pb = new ProcessBuilder(
+                YT_DLP_COMMAND,
+                "-J",
+                "--no-warnings",
+                "--ignore-errors",
+                url
+        );
+
+        Process process = pb.start();
+
+        // stdout va stderr ni parallel o'qish — deadlock bo'lmasligi uchun
+        CompletableFuture<String> stdoutFuture = readStreamAsync(process.getInputStream());
+        CompletableFuture<String> stderrFuture = readStreamAsync(process.getErrorStream());
+
+        boolean finished = process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            log.error("yt-dlp timed out after {}s for URL: {}", PROCESS_TIMEOUT_SECONDS, url);
+            throw new RuntimeException("yt-dlp execution timed out");
+        }
+
+        int exitCode = process.exitValue();
+        String jsonOutput = stdoutFuture.get(5, TimeUnit.SECONDS);
+        String errorOutput = stderrFuture.get(5, TimeUnit.SECONDS);
+
+        // --ignore-errors bilan exit code 0 yoki 1 bo'lishi mumkin,
+        // lekin JSON chiqish bo'lsa uni parse qilishga harakat qilamiz
+        if (jsonOutput != null && !jsonOutput.isBlank()) {
+            try {
+                JsonNode rootNode = objectMapper.readTree(jsonOutput);
+                List<MediaItem> items = parseResponse(rootNode);
+                log.info("yt-dlp resolved {} media item(s) for URL: {}", items.size(), url);
+                if (!items.isEmpty()) {
+                    return items;
+                }
+            } catch (Exception e) {
+                log.warn("Failed to parse yt-dlp JSON output: {}", e.getMessage());
+            }
+        }
+
+        if (exitCode != 0) {
+            log.error("yt-dlp exit code {} for URL: {}. stderr: {}", exitCode, url,
+                    errorOutput.length() > 300 ? errorOutput.substring(0, 300) : errorOutput);
+            throw new RuntimeException("yt-dlp failed with exit code " + exitCode);
+        }
+
+        return Collections.emptyList();
+    }
+
+    // ============== INSTAGRAM EMBED FALLBACK ==============
+
+    private List<MediaItem> resolveViaInstagramEmbed(String url) throws Exception {
+        log.info("Trying Instagram embed fallback for URL: {}", url);
+
+        // Query parametrlarni olib tashlash
+        String cleanUrl = url.contains("?") ? url.substring(0, url.indexOf("?")) : url;
+        if (!cleanUrl.endsWith("/")) cleanUrl += "/";
+
+        String embedUrl = cleanUrl + "embed/";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(embedUrl))
+                .timeout(Duration.ofSeconds(15))
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .GET()
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        String html = response.body();
+
+        if (html == null || html.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        List<MediaItem> items = new ArrayList<>();
+
+        // Video URL larni izlash
+        Pattern videoPattern = Pattern.compile("\"video_url\"\\s*:\\s*\"([^\"]+)\"");
+        Matcher videoMatcher = videoPattern.matcher(html);
+        while (videoMatcher.find()) {
+            String videoUrl = videoMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
+            items.add(new MediaItem(videoUrl, "video"));
+        }
+
+        // Rasm URL larni izlash (display_url yoki src)
+        if (items.isEmpty()) {
+            // Birinchi EmbeddedMediaImage src ni izlash
+            Pattern imgPattern = Pattern.compile("class=\"EmbeddedMediaImage\"[^>]*src=\"([^\"]+)\"");
+            Matcher imgMatcher = imgPattern.matcher(html);
+            while (imgMatcher.find()) {
+                String imgUrl = imgMatcher.group(1).replace("&amp;", "&");
+                items.add(new MediaItem(imgUrl, "image"));
+            }
+
+            // Fallback: display_url dan izlash
+            if (items.isEmpty()) {
+                Pattern displayPattern = Pattern.compile("\"display_url\"\\s*:\\s*\"([^\"]+)\"");
+                Matcher displayMatcher = displayPattern.matcher(html);
+                while (displayMatcher.find()) {
+                    String imgUrl = displayMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
+                    items.add(new MediaItem(imgUrl, "image"));
+                }
+            }
+        }
+
+        log.info("Instagram embed resolved {} media item(s) for URL: {}", items.size(), url);
+        return items;
+    }
+
+    // ============== JSON PARSE METODLARI ==============
 
     private CompletableFuture<String> readStreamAsync(java.io.InputStream inputStream) {
         return CompletableFuture.supplyAsync(() -> {
@@ -103,7 +205,9 @@ public class YtDlpClient {
             JsonNode entries = rootNode.get("entries");
             if (entries != null && entries.isArray()) {
                 for (JsonNode entry : entries) {
-                    addMediaItemFromJson(entry, items);
+                    if (entry != null && !entry.isNull()) {
+                        addMediaItemFromJson(entry, items);
+                    }
                 }
             }
         } else {
@@ -126,7 +230,7 @@ public class YtDlpClient {
             }
         }
 
-        // 2-fallback: formats massividan eng yaxshi mp4 formatni izlash
+        // 2-fallback: formats massividan eng yaxshi video formatni izlash
         if (isBlank(downloadUrl) && node.has("formats")) {
             JsonNode formats = node.get("formats");
             if (formats.isArray()) {
@@ -134,7 +238,7 @@ public class YtDlpClient {
             }
         }
 
-        // 3-fallback: thumbnails dan rasm URL izlash (rasm postlar uchun)
+        // 3-fallback: thumbnail (rasm postlar uchun)
         if (isBlank(downloadUrl) && node.has("thumbnail")) {
             downloadUrl = getTextSafe(node, "thumbnail");
             if (!isBlank(downloadUrl)) {
@@ -144,8 +248,7 @@ public class YtDlpClient {
         }
 
         if (isBlank(downloadUrl)) {
-            log.warn("No download URL found for id: {}. Available keys: {}",
-                    getTextSafe(node, "id"), getJsonKeys(node));
+            log.warn("No download URL found for id: {}", getTextSafe(node, "id"));
             return;
         }
 
@@ -153,48 +256,24 @@ public class YtDlpClient {
         items.add(new MediaItem(downloadUrl, mediaType));
     }
 
-    /**
-     * formats massividan eng yaxshi video URL ni topish.
-     * mp4 formatdagi eng katta o'lchamli yoki eng yuqori sifatli variantni tanlaydi.
-     */
     private String findBestVideoUrl(JsonNode formats) {
         String bestUrl = null;
         int bestHeight = -1;
-        long bestFilesize = -1;
 
         for (JsonNode fmt : formats) {
             String fmtUrl = getTextSafe(fmt, "url");
             if (isBlank(fmtUrl)) continue;
 
-            String ext = getTextSafe(fmt, "ext");
             String vcodec = getTextSafe(fmt, "vcodec");
-            String acodec = getTextSafe(fmt, "acodec");
-
-            // Faqat video codec bor formatlarni afzal ko'rish
             boolean hasVideo = vcodec != null && !"none".equals(vcodec);
-            boolean hasAudio = acodec != null && !"none".equals(acodec);
 
-            // Video + audio birgalikda eng yaxshi
             if (hasVideo) {
                 int height = fmt.has("height") && !fmt.get("height").isNull()
                         ? fmt.get("height").asInt(0) : 0;
-                long filesize = fmt.has("filesize") && !fmt.get("filesize").isNull()
-                        ? fmt.get("filesize").asLong(0) : 0;
 
-                // Prioritet: video+audio > faqat video, keyin sifat bo'yicha
-                boolean isBetter = false;
-                if (bestUrl == null) {
-                    isBetter = true;
-                } else if (height > bestHeight) {
-                    isBetter = true;
-                } else if (height == bestHeight && filesize > bestFilesize) {
-                    isBetter = true;
-                }
-
-                if (isBetter) {
+                if (bestUrl == null || height > bestHeight) {
                     bestUrl = fmtUrl;
                     bestHeight = height;
-                    bestFilesize = filesize;
                 }
             }
         }
@@ -203,9 +282,7 @@ public class YtDlpClient {
         if (bestUrl == null) {
             for (JsonNode fmt : formats) {
                 String fmtUrl = getTextSafe(fmt, "url");
-                if (!isBlank(fmtUrl)) {
-                    return fmtUrl;
-                }
+                if (!isBlank(fmtUrl)) return fmtUrl;
             }
         }
 
@@ -214,7 +291,6 @@ public class YtDlpClient {
 
     private String detectMediaType(JsonNode node, String downloadUrl) {
         String ext = getTextSafe(node, "ext");
-
         if (ext != null) {
             return switch (ext.toLowerCase()) {
                 case "mp4", "webm", "mkv", "mov" -> "video";
@@ -222,7 +298,6 @@ public class YtDlpClient {
                 default -> "video";
             };
         }
-
         if (downloadUrl.contains(".jpg") || downloadUrl.contains(".webp") || downloadUrl.contains(".png")) {
             return "image";
         }
@@ -239,10 +314,5 @@ public class YtDlpClient {
 
     private boolean isBlank(String s) {
         return s == null || s.isBlank();
-    }
-
-    private String getJsonKeys(JsonNode node) {
-        if (node == null || !node.isObject()) return "[]";
-        return new ArrayList<>(node.propertyNames()).toString();
     }
 }
