@@ -29,6 +29,7 @@ FROM eclipse-temurin:21-jre
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        python3 \
         ffmpeg \
         curl \
         ca-certificates \
