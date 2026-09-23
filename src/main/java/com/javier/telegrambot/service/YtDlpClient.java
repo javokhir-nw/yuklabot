@@ -37,12 +37,12 @@ public class YtDlpClient {
                     "--no-playlist",
                     url
             );
-            // stderr ni stdout ga birlashtirish orqali deadlock oldini olamiz
-            pb.redirectErrorStream(true);
+            // stderr ni butunlay tashlab yuborish — stdout toza JSON bo'ladi
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
 
             Process process = pb.start();
 
-            // stdout ni alohida thread da o'qish — process bloklanmasligi uchun
+            // stdout ni alohida thread da o'qish — deadlock bo'lmasligi uchun
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
                 StringBuilder sb = new StringBuilder();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -63,26 +63,20 @@ public class YtDlpClient {
                 throw new RuntimeException("yt-dlp execution timed out");
             }
 
-            String fullOutput = outputFuture.get(5, TimeUnit.SECONDS);
             int exitCode = process.exitValue();
+            String jsonOutput = outputFuture.get(5, TimeUnit.SECONDS);
 
             if (exitCode != 0) {
-                log.error("yt-dlp failed with exit code {} for URL: {}. Output: {}", exitCode, url,
-                        fullOutput.length() > 500 ? fullOutput.substring(0, 500) : fullOutput);
+                log.error("yt-dlp failed with exit code {} for URL: {}", exitCode, url);
                 throw new RuntimeException("yt-dlp execution failed with exit code " + exitCode);
             }
 
-            if (fullOutput.isBlank()) {
+            if (jsonOutput == null || jsonOutput.isBlank()) {
                 log.error("yt-dlp returned empty output for URL: {}", url);
                 return Collections.emptyList();
             }
 
-            // JSON ni ajratib olish (stderr ham aralashgan bo'lishi mumkin)
-            String jsonOutput = extractJson(fullOutput);
-            if (jsonOutput == null || jsonOutput.isBlank()) {
-                log.error("Could not extract valid JSON from yt-dlp output for URL: {}", url);
-                return Collections.emptyList();
-            }
+            log.debug("yt-dlp JSON output length: {} chars for URL: {}", jsonOutput.length(), url);
 
             JsonNode rootNode = objectMapper.readTree(jsonOutput);
             List<MediaItem> items = parseResponse(rootNode);
@@ -95,26 +89,6 @@ public class YtDlpClient {
             log.error("Failed to resolve media using yt-dlp for URL: {}", url, e);
             throw new RuntimeException("Media processing failed", e);
         }
-    }
-
-    /**
-     * redirectErrorStream(true) bo'lganda, stderr va stdout aralashgan bo'lishi mumkin.
-     * JSON qismini topib ajratib olish.
-     */
-    private String extractJson(String output) {
-        int braceStart = output.indexOf('{');
-        if (braceStart == -1) return null;
-
-        int depth = 0;
-        for (int i = braceStart; i < output.length(); i++) {
-            char c = output.charAt(i);
-            if (c == '{') depth++;
-            else if (c == '}') depth--;
-            if (depth == 0) {
-                return output.substring(braceStart, i + 1);
-            }
-        }
-        return null;
     }
 
     private List<MediaItem> parseResponse(JsonNode rootNode) {
@@ -172,7 +146,6 @@ public class YtDlpClient {
         } else if (downloadUrl.contains(".jpg") || downloadUrl.contains(".webp") || downloadUrl.contains(".png")) {
             mediaType = "image";
         } else {
-            // Default: video (ko'p hollarda Instagram videolar)
             mediaType = "video";
         }
 
