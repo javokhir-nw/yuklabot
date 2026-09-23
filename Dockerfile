@@ -27,7 +27,6 @@ RUN mkdir -p target/dependency \
 # ============================================
 FROM eclipse-temurin:21-jre
 
-# yt-dlp + ffmpeg uchun kerakli paketlar
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -37,21 +36,17 @@ RUN apt-get update \
         https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
         -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp \
-    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user
 RUN groupadd -r spring \
     && useradd -r -g spring spring
 
 WORKDIR /app
 
-ARG DEPENDENCY=/app/target/dependency
+COPY --from=build /app/target/*.jar app.jar
 
-COPY --from=build ${DEPENDENCY}/BOOT-INF/lib /app/lib
-COPY --from=build ${DEPENDENCY}/META-INF /app/META-INF
-COPY --from=build ${DEPENDENCY}/BOOT-INF/classes /app
+RUN chown spring:spring /app/app.jar
 
 USER spring:spring
 
-ENTRYPOINT ["java","-cp","app:app/lib/*","com.javier.telegrambot.TelegramBotApplication"]
+ENTRYPOINT ["java", "-jar", "app.jar"]
