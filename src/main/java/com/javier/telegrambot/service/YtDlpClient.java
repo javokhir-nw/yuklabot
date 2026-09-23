@@ -116,21 +116,21 @@ public class YtDlpClient {
     }
 
     // ================================================================
-    // INSTAGRAM RASM FALLBACK (og:image)
+    // INSTAGRAM RASM FALLBACK (embed API)
     // ================================================================
 
     private List<MediaItem> resolveInstagramImages(String url) throws Exception {
-        log.info("Trying Instagram og:image fallback for URL: {}", url);
+        log.info("Trying Instagram embed fallback for URL: {}", url);
 
         String cleanUrl = url.contains("?") ? url.substring(0, url.indexOf("?")) : url;
         if (!cleanUrl.endsWith("/")) cleanUrl += "/";
 
+        String embedUrl = cleanUrl + "embed/";
+
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(cleanUrl))
+                .uri(URI.create(embedUrl))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
-                .header("Accept", "text/html")
-                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .GET()
                 .build();
 
@@ -141,32 +141,36 @@ public class YtDlpClient {
 
         List<MediaItem> items = new ArrayList<>();
 
-        // og:video — ba'zan HTML da video URL ham bo'lishi mumkin
-        extractOgUrls(html, "og:video", "video", items);
-
-        // og:image — rasm URL
-        if (items.isEmpty()) {
-            extractOgUrls(html, "og:image", "image", items);
+        // 1-bosqich: Video bormi?
+        Pattern videoPattern = Pattern.compile("\"video_url\"\\s*:\\s*\"([^\"]+)\"");
+        Matcher videoMatcher = videoPattern.matcher(html);
+        while (videoMatcher.find()) {
+            String videoUrl = videoMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
+            items.add(new MediaItem(videoUrl, "video"));
         }
 
-        log.info("Instagram og fallback resolved {} media item(s) for URL: {}", items.size(), url);
-        return items;
-    }
+        // 2-bosqich: Karusel rasmlari (EmbeddedMediaImage)
+        if (items.isEmpty()) {
+            Pattern imgPattern = Pattern.compile("class=\"EmbeddedMediaImage\"[^>]*src=\"([^\"]+)\"");
+            Matcher imgMatcher = imgPattern.matcher(html);
+            while (imgMatcher.find()) {
+                String imgUrl = imgMatcher.group(1).replace("&amp;", "&");
+                items.add(new MediaItem(imgUrl, "image"));
+            }
 
-    private void extractOgUrls(String html, String property, String mediaType, List<MediaItem> items) {
-        Pattern pattern = Pattern.compile(
-                "<meta[^>]*(?:property=[\"']" + Pattern.quote(property) + "[\"'][^>]*content=[\"']([^\"']+)[\"']" +
-                        "|content=[\"']([^\"']+)[\"'][^>]*property=[\"']" + Pattern.quote(property) + "[\"'])",
-                Pattern.CASE_INSENSITIVE
-        );
-
-        Matcher matcher = pattern.matcher(html);
-        while (matcher.find()) {
-            String mediaUrl = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
-            if (mediaUrl != null && !mediaUrl.isBlank()) {
-                items.add(new MediaItem(mediaUrl.replace("&amp;", "&"), mediaType));
+            // Fallback: display_url (bitta rasm bo'lsa)
+            if (items.isEmpty()) {
+                Pattern displayPattern = Pattern.compile("\"display_url\"\\s*:\\s*\"([^\"]+)\"");
+                Matcher displayMatcher = displayPattern.matcher(html);
+                while (displayMatcher.find()) {
+                    String imgUrl = displayMatcher.group(1).replace("\\u0026", "&").replace("\\/", "/");
+                    items.add(new MediaItem(imgUrl, "image"));
+                }
             }
         }
+
+        log.info("Instagram embed fallback resolved {} media item(s) for URL: {}", items.size(), url);
+        return items;
     }
 
     // ================================================================
