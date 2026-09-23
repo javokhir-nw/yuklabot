@@ -137,7 +137,11 @@ public class YtDlpClient {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         String html = response.body();
 
+        log.info("Instagram embed response HTML (first 500 chars): {}", 
+                 html != null && html.length() > 500 ? html.substring(0, 500) : html);
+
         if (html == null || html.isBlank()) return Collections.emptyList();
+
 
         List<MediaItem> items = new ArrayList<>();
 
