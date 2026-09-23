@@ -18,7 +18,7 @@ public class YtDlpClient {
 
     private final ObjectMapper objectMapper;
     // Loyiha joriy papkasidagi yt-dlp.exe manziliga yo'l (Windows muhiti yodda tutilgan)
-    private static final String YT_DLP_COMMAND = "yt-dlp.exe";
+    private static final String YT_DLP_COMMAND = "yt-dlp";
 
     public YtDlpClient(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
