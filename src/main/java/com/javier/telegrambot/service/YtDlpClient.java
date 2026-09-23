@@ -53,7 +53,14 @@ public class YtDlpClient {
                 }
             }
 
-            int exitCode = process.waitFor();
+            boolean finished = process.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.error("yt-dlp execution timed out after 60 seconds");
+                throw new RuntimeException("yt-dlp execution timed out");
+            }
+
+            int exitCode = process.exitValue();
             if (exitCode != 0) {
                 log.error("yt-dlp failed with exit code {}. Error: {}", exitCode, errorOutput);
                 throw new RuntimeException("yt-dlp execution failed");
@@ -99,6 +106,16 @@ public class YtDlpClient {
         if (node == null) return;
         
         String downloadUrl = node.has("url") ? node.get("url").asText() : null;
+        
+        if (downloadUrl == null || downloadUrl.isBlank()) {
+            if (node.has("requested_downloads") && node.get("requested_downloads").isArray()) {
+                JsonNode requested = node.get("requested_downloads");
+                if (requested.size() > 0 && requested.get(0).has("url")) {
+                    downloadUrl = requested.get(0).get("url").asText();
+                }
+            }
+        }
+
         if (downloadUrl != null && !downloadUrl.isBlank()) {
             String ext = node.has("ext") ? node.get("ext").asText() : "";
             if (ext.isBlank()) {
