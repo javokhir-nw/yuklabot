@@ -101,6 +101,7 @@ public class TelegramBotService extends TelegramLongPollingBot {
     }
 
     private void sendSingleMedia(String chatId, MediaItem media) {
+        // 1-Tezkor Uslub: To'g'ridan to'g'ri URL ni Telegramga berish (Eski, tezkor usul)
         try {
             if (media.isVideo()) {
                 SendVideo sendVideo = new SendVideo();
@@ -116,9 +117,41 @@ public class TelegramBotService extends TelegramLongPollingBot {
                 sendPhoto.setCaption(NAV_MESSAGE);
                 execute(sendPhoto);
             }
+            log.info("Direct URL orqali 1 soniyada yuborildi!");
+            return; // Agar muvaffaqiyatli bo'lsa, pastdagi sekin usulga o'tmaymiz
         } catch (TelegramApiException e) {
-            log.error("Failed to send single media", e);
-            sendTextMessage(chatId, "❌ Media Telegram'ga yuborilmadi.");
+            log.warn("Telegram direct URL ni qabul qila olmadi (IP blok), sekin-ko'prik usuliga o'tilmoqda...");
+        }
+
+        // 2-Kafolatlangan Uslub: (Yangi usul, faylni yuklab, Telegramga berish)
+        java.io.File tempFile = null;
+        try {
+            log.info("Sizning kompyuteringiz orqali Telegramga media jo'natilmoqda...");
+            String ext = media.isVideo() ? ".mp4" : ".jpg";
+            tempFile = downloadToTempFile(media.url(), ext);
+            
+            if (media.isVideo()) {
+                SendVideo sendVideo = new SendVideo();
+                sendVideo.setChatId(chatId);
+                sendVideo.setVideo(new InputFile(tempFile));
+                sendVideo.setCaption(NAV_MESSAGE);
+                sendVideo.setSupportsStreaming(true);
+                execute(sendVideo);
+            } else {
+                SendPhoto sendPhoto = new SendPhoto();
+                sendPhoto.setChatId(chatId);
+                sendPhoto.setPhoto(new InputFile(tempFile));
+                sendPhoto.setCaption(NAV_MESSAGE);
+                execute(sendPhoto);
+            }
+            log.info("Media Telegramga muvaffaqiyatli yuborildi!");
+        } catch (Exception e) {
+            log.error("Failed to send single media: {}", media.url(), e);
+            sendTextMessage(chatId, "❌ Media Telegram'ga yuborilmadi yoki hajmi juda katta.");
+        } finally {
+            if (tempFile != null && tempFile.exists()) {
+                tempFile.delete();
+            }
         }
     }
 
@@ -130,6 +163,7 @@ public class TelegramBotService extends TelegramLongPollingBot {
     }
 
     private void sendMediaGroupBatch(String chatId, List<MediaItem> mediaItems) {
+        List<java.io.File> filesToClose = new ArrayList<>();
         try {
             SendMediaGroup mediaGroup = new SendMediaGroup();
             mediaGroup.setChatId(chatId);
@@ -137,14 +171,23 @@ public class TelegramBotService extends TelegramLongPollingBot {
 
             for (MediaItem item : mediaItems) {
                 if (item == null || item.url() == null || item.url().isBlank()) continue;
-                if (item.isVideo()) {
-                    InputMediaVideo video = new InputMediaVideo();
-                    video.setMedia(item.url());
-                    medias.add(video);
-                } else {
-                    InputMediaPhoto photo = new InputMediaPhoto();
-                    photo.setMedia(item.url());
-                    medias.add(photo);
+                
+                try {
+                    String ext = item.isVideo() ? ".mp4" : ".jpg";
+                    java.io.File file = downloadToTempFile(item.url(), ext);
+                    filesToClose.add(file);
+
+                    if (item.isVideo()) {
+                        InputMediaVideo video = new InputMediaVideo();
+                        video.setMedia(file, file.getName());
+                        medias.add(video);
+                    } else {
+                        InputMediaPhoto photo = new InputMediaPhoto();
+                        photo.setMedia(file, file.getName());
+                        medias.add(photo);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to proxy URL for media group item", e);
                 }
             }
             if (!medias.isEmpty()) {
@@ -154,8 +197,33 @@ public class TelegramBotService extends TelegramLongPollingBot {
             }
         } catch (TelegramApiException e) {
             log.error("Failed to send media group", e);
-            sendTextMessage(chatId, "❌ Media albumini Telegram'ga yuborib bo'lmadi.");
+            sendTextMessage(chatId, "❌ Media albumini Telegram'ga yuborib bo'lmadi (URL stream xatosi).");
+        } finally {
+            for (java.io.File file : filesToClose) {
+                if (file != null && file.exists()) {
+                    file.delete();
+                }
+            }
         }
+    }
+
+    private java.io.File downloadToTempFile(String urlStr, String suffix) throws Exception {
+        java.net.URL url = new java.net.URL(urlStr);
+        java.net.URLConnection conn = url.openConnection();
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36");
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(60000);
+        
+        java.io.File tempFile = java.io.File.createTempFile("tg_media_", suffix);
+        try (java.io.InputStream in = conn.getInputStream();
+             java.io.FileOutputStream out = new java.io.FileOutputStream(tempFile)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = in.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+            }
+        }
+        return tempFile;
     }
 
     private Integer sendTextMessage(String chatId, String text) {
