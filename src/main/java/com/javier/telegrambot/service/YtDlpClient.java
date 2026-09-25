@@ -108,7 +108,6 @@ public class YtDlpClient {
                 "-J",
                 "--no-warnings",
                 "--ignore-errors",
-                "--format", "b",
                 "--extractor-args", "youtube:player_client=android",
                 url
         ));
