@@ -239,7 +239,10 @@ public class YtDlpClient {
                                     // Agar rasm URL si bo'lsa
                                     if (imgUrl.contains(".jpg") || imgUrl.contains(".webp") || imgUrl.contains(".png")) {
                                         items.add(new MediaItem(imgUrl.replace("\\u0026", "&"), "image"));
-                                        break; // Shu element uchun bitta URL yetarli
+                                        break; // Bitta URL yetarli
+                                    } else if (imgUrl.contains(".mp4")) {
+                                        items.add(new MediaItem(imgUrl.replace("\\u0026", "&"), "video"));
+                                        break;
                                     }
                                 }
                             }
@@ -336,8 +339,9 @@ public class YtDlpClient {
 
             String vcodec = getTextSafe(fmt, "vcodec");
             String acodec = getTextSafe(fmt, "acodec");
-            boolean hasVideo = vcodec != null && !"none".equals(vcodec);
-            boolean hasAudio = acodec != null && !"none".equals(acodec);
+            // Agar vcodec topilmasa, lekin url mp4 dan iborat bo'lsa, vcodec deb qabul qilish
+            boolean hasVideo = (vcodec != null && !"none".equals(vcodec)) || fmtUrl.contains(".mp4");
+            boolean hasAudio = (acodec != null && !"none".equals(acodec)) || fmtUrl.contains(".mp4");
             int height = fmt.has("height") && !fmt.get("height").isNull() ? fmt.get("height").asInt(0) : 0;
 
             if (hasVideo && hasAudio) {
