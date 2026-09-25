@@ -1,0 +1,10 @@
+package com.javier.telegrambot;
+
+public enum AdminState {
+    NONE,
+    AWAITING_BROADCAST,
+    AWAITING_COOKIE_PLATFORM,
+    AWAITING_COOKIE_INSTAGRAM,
+    AWAITING_COOKIE_YOUTUBE,
+    AWAITING_COOKIE_TIKTOK
+}
