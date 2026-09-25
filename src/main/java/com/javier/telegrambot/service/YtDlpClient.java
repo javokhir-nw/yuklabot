@@ -19,8 +19,9 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import com.javier.telegrambot.entity.InstagramCookie;
-import com.javier.telegrambot.service.InstagramCookieService;
+import com.javier.telegrambot.entity.PlatformCookie;
+import com.javier.telegrambot.entity.PlatformType;
+import com.javier.telegrambot.service.PlatformCookieService;
 import java.io.File;
 
 @Slf4j
@@ -28,12 +29,12 @@ import java.io.File;
 public class YtDlpClient {
 
     private final ObjectMapper objectMapper;
-    private final InstagramCookieService cookieService;
+    private final PlatformCookieService cookieService;
     private static final String YT_DLP_COMMAND = "yt-dlp";
     private static final int PROCESS_TIMEOUT_SECONDS = 60;
     private final HttpClient httpClient;
 
-    public YtDlpClient(ObjectMapper objectMapper, InstagramCookieService cookieService) {
+    public YtDlpClient(ObjectMapper objectMapper, PlatformCookieService cookieService) {
         this.objectMapper = objectMapper;
         this.cookieService = cookieService;
         this.httpClient = HttpClient.newBuilder()
@@ -49,7 +50,7 @@ public class YtDlpClient {
     public List<MediaItem> resolveMedia(String url) {
         int maxRetries = 2; // Try up to 2 different cookies
         for (int i = 0; i < maxRetries; i++) {
-            CookieSession session = prepareCookieSession();
+            CookieSession session = prepareCookieSession(url);
             try {
                 // 1-qadam: yt-dlp orqali urinish (video/reels uchun)
                 try {
@@ -387,18 +388,26 @@ public class YtDlpClient {
     // ================================================================
 
     private static class CookieSession {
-        InstagramCookie entity;
+        PlatformCookie entity;
         File cookieFile;
     }
     
     private static class CookieBannedException extends Exception { }
 
-    private CookieSession prepareCookieSession() {
+    private CookieSession prepareCookieSession(String url) {
         CookieSession session = new CookieSession();
-        InstagramCookie cookie = cookieService.getNextCookie();
+        PlatformType pType = PlatformType.UNKNOWN;
+        if (url != null) {
+            String lowerUrl = url.toLowerCase();
+            if (lowerUrl.contains("instagram.com")) pType = PlatformType.INSTAGRAM;
+            else if (lowerUrl.contains("youtube.com") || lowerUrl.contains("youtu.be")) pType = PlatformType.YOUTUBE;
+            else if (lowerUrl.contains("tiktok.com") || lowerUrl.contains("tiktok.com/")) pType = PlatformType.TIKTOK;
+        }
+
+        PlatformCookie cookie = cookieService.getNextCookie(pType);
         if (cookie != null) {
             try {
-                File temp = File.createTempFile("ig_cookie_" + cookie.getId(), ".txt");
+                File temp = File.createTempFile("p_cookie_" + cookie.getId(), ".txt");
                 java.nio.file.Files.writeString(temp.toPath(), cookie.getContent());
                 session.entity = cookie;
                 session.cookieFile = temp;
@@ -415,7 +424,7 @@ public class YtDlpClient {
             session.cookieFile.delete();
         }
         if (session.entity != null && banned) {
-            cookieService.banCookie(session.entity);
+            cookieService.banCookie(session.entity.getId());
         }
     }
 }

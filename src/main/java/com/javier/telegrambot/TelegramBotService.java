@@ -27,6 +27,10 @@ public class TelegramBotService extends TelegramLongPollingBot {
     private static final int TELEGRAM_MEDIA_GROUP_LIMIT = 10;
     private final TelegramProperties properties;
     private final InstagramDownloadService instagramDownloadService;
+    private final com.javier.telegrambot.repository.TelegramUserRepository userRepository;
+    private final com.javier.telegrambot.repository.PlatformCookieRepository cookieRepository;
+    private final com.javier.telegrambot.service.PlatformCookieService cookieService;
+    private final java.util.Map<String, java.util.List<Long>> userRequestTimes = new java.util.concurrent.ConcurrentHashMap<>();
 
     private final String NAV_MESSAGE = """
             📥 Media tayyor!
@@ -35,10 +39,17 @@ public class TelegramBotService extends TelegramLongPollingBot {
             👉 Botimiz: @tezda_yuklash_bot
             """;
 
-    public TelegramBotService(TelegramProperties properties, InstagramDownloadService instagramDownloadService) {
+    public TelegramBotService(TelegramProperties properties, 
+                              InstagramDownloadService instagramDownloadService,
+                              com.javier.telegrambot.repository.TelegramUserRepository userRepository,
+                              com.javier.telegrambot.repository.PlatformCookieRepository cookieRepository,
+                              com.javier.telegrambot.service.PlatformCookieService cookieService) {
         super(properties.getBotToken());
         this.properties = properties;
         this.instagramDownloadService = instagramDownloadService;
+        this.userRepository = userRepository;
+        this.cookieRepository = cookieRepository;
+        this.cookieService = cookieService;
     }
 
     @Override
@@ -55,6 +66,29 @@ public class TelegramBotService extends TelegramLongPollingBot {
 
         if (userText.isBlank()) {
             sendTextMessage(chatId, "❌ Link yuboring.");
+            return;
+        }
+
+        // Baza orqali User ni yangilash / tanish
+        com.javier.telegrambot.entity.TelegramUser user = userRepository.findById(chatId).orElseGet(() -> {
+            com.javier.telegrambot.entity.TelegramUser newUser = new com.javier.telegrambot.entity.TelegramUser();
+            newUser.setChatId(chatId);
+            newUser.setUsername(update.getMessage().getFrom().getUserName());
+            newUser.setFirstName(update.getMessage().getFrom().getFirstName());
+            newUser.setJoinedAt(java.time.LocalDateTime.now());
+            newUser.setAdmin(false); // Yangi a'zolar by default admin emas
+            return userRepository.save(newUser);
+        });
+
+        // Agar u ADMIN bo'lsa va /buyruq bergan bo'lsa
+        if (user.isAdmin() && userText.startsWith("/")) {
+            handleAdminCommand(chatId, userText);
+            return;
+        }
+
+        // Agar admin bo'lmasa 1 daqiqalik cheklov (Rate limit)
+        if (!user.isAdmin() && isRateLimited(chatId)) {
+            sendTextMessage(chatId, "⚠️ 1 daqiqada 5 ta link yuklay olasiz. Iltimos, biroz kutib turing!");
             return;
         }
 
@@ -235,6 +269,67 @@ public class TelegramBotService extends TelegramLongPollingBot {
         } catch (TelegramApiException e) {
             log.error("Failed to send text message", e);
             return null;
+        }
+    }
+
+    private boolean isRateLimited(String chatId) {
+        long now = System.currentTimeMillis();
+        userRequestTimes.compute(chatId, (id, times) -> {
+            if (times == null) times = new ArrayList<>();
+            times.removeIf(t -> now - t > 60000); // Oxirgi 60 sekunddan eskilarni tozalash
+            return times;
+        });
+
+        if (userRequestTimes.get(chatId).size() >= 5) {
+            return true;
+        }
+        userRequestTimes.get(chatId).add(now);
+        return false;
+    }
+
+    private void handleAdminCommand(String chatId, String text) {
+        if (text.equals("/stat")) {
+            long totalUsers = userRepository.count();
+            sendTextMessage(chatId, "📊 Bot statistikasi:\nJami yig'ilgan foydalanuvchilar: " + totalUsers + " ta");
+        } else if (text.startsWith("/addcookie ")) {
+            String[] parts = text.split(" ", 3);
+            if (parts.length < 3) {
+                sendTextMessage(chatId, "⚠️ Xato format! Bunday kiriting:\n/addcookie instagram [matn]\n/addcookie youtube [matn]");
+                return;
+            }
+            com.javier.telegrambot.entity.PlatformType pType;
+            try {
+                pType = com.javier.telegrambot.entity.PlatformType.valueOf(parts[1].toUpperCase());
+            } catch (Exception e) {
+                sendTextMessage(chatId, "⚠️ Tur noto'g'ri! Faqat INSTAGRAM, YOUTUBE, TIKTOK foydalaning.");
+                return;
+            }
+            com.javier.telegrambot.entity.PlatformCookie cookie = new com.javier.telegrambot.entity.PlatformCookie();
+            cookie.setUsername("admin_" + pType + "_" + System.currentTimeMillis());
+            cookie.setContent(parts[2].trim());
+            cookie.setPlatformType(pType);
+            cookie.setActive(true);
+            cookie.setUsageCount(0);
+            cookie.setLastUsedAt(java.time.LocalDateTime.now());
+            cookieRepository.save(cookie);
+            cookieService.refreshCookieCache();
+            sendTextMessage(chatId, "✅ " + pType + " Kukisi muvaffaqiyatli qo'shildi va kesh yangilandi!");
+        } else if (text.equals("/cookies")) {
+            long total = cookieRepository.count();
+            sendTextMessage(chatId, "🍪 Jami yozilgan kukilar soni: " + total + " ta");
+        } else if (text.startsWith("/send ")) {
+            String message = text.substring("/send ".length()).trim();
+            sendTextMessage(chatId, "⏳ Xabarni hammaga yubormoqdaman, jarayon boshlandi...");
+            java.util.List<com.javier.telegrambot.entity.TelegramUser> users = userRepository.findAll();
+            int success = 0;
+            for (com.javier.telegrambot.entity.TelegramUser u : users) {
+                if (sendTextMessage(u.getChatId(), message) != null) {
+                    success++;
+                }
+            }
+            sendTextMessage(chatId, "✅ Tarqatish tugadi: " + success + "/" + users.size() + " kishiga yetib bordi.");
+        } else {
+            sendTextMessage(chatId, "⚒ Admin buyruqlari:\n/stat - Umumiy a'zolar soni\n/addcookie [tur] [matn] - Yangi Kuki qo'shish\n/cookies - Jami kukilar soni\n/send [matn] - Reklama tarqatish");
         }
     }
 
