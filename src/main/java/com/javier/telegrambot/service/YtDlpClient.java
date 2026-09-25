@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import com.javier.telegrambot.entity.PlatformCookie;
 import com.javier.telegrambot.entity.PlatformType;
 import com.javier.telegrambot.service.PlatformCookieService;
+import jakarta.annotation.PostConstruct;
 import java.io.File;
 
 @Slf4j
@@ -41,6 +42,18 @@ public class YtDlpClient {
                 .connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
+    }
+
+    @PostConstruct
+    public void updateYtDlpOnStartup() {
+        try {
+            log.info("Checking and forcefully updating yt-dlp to the absolute latest version inside container...");
+            Process p = new ProcessBuilder(YT_DLP_COMMAND, "-U").start();
+            p.waitFor(30, TimeUnit.SECONDS);
+            log.info("yt-dlp update gracefully finished.");
+        } catch (Exception e) {
+            log.error("Failed to auto-update yt-dlp", e);
+        }
     }
 
     /**
@@ -108,7 +121,6 @@ public class YtDlpClient {
                 "-J",
                 "--no-warnings",
                 "--ignore-errors",
-                "--extractor-args", "youtube:player_client=android",
                 url
         ));
         
