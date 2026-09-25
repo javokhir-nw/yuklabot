@@ -152,6 +152,8 @@ public class YtDlpClient {
         String stderrOutput = stderrFuture.get(5, TimeUnit.SECONDS);
         int exitCode = process.exitValue();
 
+        log.info("yt-dlp RAW stdout ({} chars): {}", jsonOutput.length(), jsonOutput.length() > 500 ? jsonOutput.substring(0, 500) + "..." : jsonOutput);
+        
         if (jsonOutput != null && !jsonOutput.isBlank()) {
             try {
                 JsonNode rootNode = objectMapper.readTree(jsonOutput);
@@ -211,6 +213,11 @@ public class YtDlpClient {
 
         String jsonOutput = stdoutFuture.get(5, TimeUnit.SECONDS);
         String stderrOutput = stderrFuture.get(5, TimeUnit.SECONDS);
+
+        log.info("gallery-dl RAW stdout ({} chars): {}", jsonOutput.length(), jsonOutput.length() > 1000 ? jsonOutput.substring(0, 1000) + "..." : jsonOutput);
+        if (!stderrOutput.isBlank()) {
+            log.info("gallery-dl RAW stderr: {}", stderrOutput);
+        }
 
         if (stderrOutput != null && (stderrOutput.contains("HttpError: 401 Unauthorized") || 
                                      stderrOutput.contains("LoginRequired"))) {
