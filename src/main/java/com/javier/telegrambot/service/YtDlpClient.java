@@ -69,6 +69,7 @@ public class YtDlpClient {
                 try {
                     List<MediaItem> items = resolveViaYtDlp(url, session);
                     if (!items.isEmpty()) {
+                        if (session.entity != null) cookieService.updateUsage(session.entity.getId());
                         cleanupSession(session, false);
                         return items;
                     }
@@ -85,6 +86,7 @@ public class YtDlpClient {
                     try {
                         List<MediaItem> items = resolveViaGalleryDl(url, session);
                         if (!items.isEmpty()) {
+                            if (session.entity != null) cookieService.updateUsage(session.entity.getId());
                             cleanupSession(session, false);
                             return items;
                         }
