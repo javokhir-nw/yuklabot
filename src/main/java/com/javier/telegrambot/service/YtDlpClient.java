@@ -171,7 +171,8 @@ public class YtDlpClient {
                     
             if (stderrOutput.toLowerCase().contains("login required") || 
                 stderrOutput.toLowerCase().contains("confirm you're not a bot") ||
-                stderrOutput.toLowerCase().contains("401")) {
+                stderrOutput.toLowerCase().contains("401") || 
+                stderrOutput.toLowerCase().contains("jsondecodeerror")) {
                 throw new CookieBannedException();
             }
             throw new RuntimeException("yt-dlp failed with exit code " + exitCode);
@@ -219,8 +220,9 @@ public class YtDlpClient {
             log.info("gallery-dl RAW stderr: {}", stderrOutput);
         }
 
-        if (stderrOutput != null && (stderrOutput.contains("HttpError: 401 Unauthorized") || 
-                                     stderrOutput.contains("LoginRequired"))) {
+        if ((stderrOutput != null && (stderrOutput.contains("HttpError: 401 Unauthorized") || 
+                                     stderrOutput.contains("LoginRequired"))) ||
+            (jsonOutput != null && jsonOutput.contains("redirect to login page"))) {
             throw new CookieBannedException();
         }
 
