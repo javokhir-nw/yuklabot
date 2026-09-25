@@ -121,6 +121,7 @@ public class YtDlpClient {
                 "-J",
                 "--no-warnings",
                 "--ignore-errors",
+                "--extractor-args", "youtube:player_client=ios,tv",
                 url
         ));
         
