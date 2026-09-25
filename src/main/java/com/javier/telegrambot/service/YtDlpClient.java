@@ -121,9 +121,15 @@ public class YtDlpClient {
                 "-J",
                 "--no-warnings",
                 "--ignore-errors",
-                "--extractor-args", "youtube:player_client=ios,tv",
-                url
+                "--extractor-args", "youtube:player_client=ios,tv"
         ));
+
+        if (!url.contains("youtube.com") && !url.contains("youtu.be")) {
+            commandArgs.add("--format");
+            commandArgs.add("b");
+        }
+        
+        commandArgs.add(url);
         
         if (session != null && session.cookieFile != null) {
             commandArgs.add("--cookies");
